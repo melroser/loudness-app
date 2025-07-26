@@ -1,493 +1,392 @@
-"use client"; // Add this directive at the top for Next.js App Router
+"use client";
 
-import React, { useState, useRef, useEffect, useCallback } from 'react'; // Corrected import for hooks
-import Head from 'next/head';
+import { useState, useRef, useEffect, ChangeEvent } from "react";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  CartesianGrid,
+} from "recharts";
+import { motion } from "framer-motion";
 
-// ... (rest of the I. TYPES AND INTERFACES - no changes needed here)
-interface LoudnessMetrics {
-  integratedLUFS: number;
-  truePeakDBTP: number;
+interface WavePoint {
+  time: number;
+  peak: number;
+}
+interface LufsPoint {
+  time: number;
+  lufs: number;
+}
+interface AnalysisResult {
+  lufs: number;
+  peakDb: number;
+  dynRange: number;
+  waveformData: WavePoint[];
+  lufsData: LufsPoint[];
 }
 
-interface PlatformTarget {
-  id: string;
-  name: string;
-  targetLUFS: number;
-  targetPeakDBTP: number;
-  bitrateRecommendation?: string;
-  processedMetrics?: LoudnessMetrics;
-  gainAdjustmentDB?: number;
-  willBeLimited?: boolean;
-}
+type Platform = "Original" | "Spotify" | "Apple Music" | "Tidal" | "SoundCloud";
 
-interface OriginalAudioInfo extends LoudnessMetrics {
-  fileName: string;
-  duration: number;
-  sampleRate: number;
-  audioBuffer?: AudioBuffer;
-}
-
-// ... (rest of the II. CONSTANTS - no changes needed here)
-const PLATFORM_TARGETS_DATA: Omit<PlatformTarget, 'processedMetrics' | 'gainAdjustmentDB' | 'willBeLimited'>[] = [
-  { id: 'spotify', name: 'Spotify', targetLUFS: -14, targetPeakDBTP: -1, bitrateRecommendation: "Upload high-quality (e.g., WAV/FLAC), they'll transcode to Opus/AAC. Target -14 LUFS." },
-  { id: 'apple', name: 'Apple Music', targetLUFS: -16, targetPeakDBTP: -1, bitrateRecommendation: "Upload high-quality (e.g., ALAC/WAV/FLAC). Target -16 LUFS." },
-  { id: 'youtube', name: 'YouTube', targetLUFS: -14, targetPeakDBTP: -1, bitrateRecommendation: "Upload high-quality. Target -14 LUFS." },
-  { id: 'soundcloud', name: 'SoundCloud', targetLUFS: -10, targetPeakDBTP: -0.5, bitrateRecommendation: "Less aggressive normalization. Can handle louder masters. Target around -8 to -13 LUFS." },
-  { id: 'tidal', name: 'Tidal (HiFi)', targetLUFS: -14, targetPeakDBTP: -1, bitrateRecommendation: "Lossless (FLAC/ALAC) preferred. Target -14 LUFS for most content." },
-];
-
-// ... (rest of the III. HELPER COMPONENTS & FUNCTIONS - LoudnessBar, formatDB, formatLUFS - no changes needed here)
-interface LoudnessBarProps {
-  value: number;
-  target?: number;
-  max: number;
-  min: number;
-  unit: string;
-  label: string;
-  isOriginal?: boolean;
-}
-
-const LoudnessBar: React.FC<LoudnessBarProps> = ({ value, target, max, min, unit, label, isOriginal = false }) => {
-  const range = max - min;
-  const validValue = isFinite(value) ? value : min;
-  const percentage = Math.max(0, Math.min(100, ((validValue - min) / range) * 100));
-  const targetPercentage = (target !== undefined && isFinite(target)) ? Math.max(0, Math.min(100, ((target - min) / range) * 100)) : undefined;
-
-  let barColor = "bg-gray-600";
-  if (isFinite(value)) {
-    if (unit === "LUFS") {
-      if (isOriginal) {
-         if (value > -10) barColor = "bg-red-500";
-         else if (value > -13) barColor = "bg-yellow-500";
-         else if (value < -18) barColor = "bg-sky-400";
-         else barColor = "bg-green-500";
-      } else {
-          if (target !== undefined) {
-            if (Math.abs(value - target) < 0.5) barColor = "bg-green-500";
-            else if (value > target) barColor = "bg-yellow-500";
-            else barColor = "bg-sky-400";
-            if (value > target + 1.5) barColor = "bg-red-500";
-          }
-      }
-    } else if (unit === "dBFS" || unit === "dBTP") {
-      if (isOriginal) {
-        if (value > -0.1) barColor = "bg-red-700";
-        else if (value > -1.0) barColor = "bg-red-500";
-        else if (value > -2.0) barColor = "bg-yellow-500";
-        else barColor = "bg-green-500";
-      } else {
-         if (target !== undefined) {
-            if (value > target) barColor = "bg-red-500";
-            else if (value > target - 0.5) barColor = "bg-yellow-500";
-            else barColor = "bg-green-500";
-         }
-      }
-    }
-  }
-
-  return (
-    <div className="my-2">
-      <div className="flex justify-between text-xs mb-0.5 text-gray-300">
-        <span>{label}: {isFinite(value) ? value.toFixed(1) : "N/A"} {unit}</span>
-        {target !== undefined && isFinite(target) && <span>Target: {target.toFixed(1)} {unit}</span>}
-      </div>
-      <div className="w-full bg-gray-700 rounded-full h-4 relative overflow-hidden shadow-inner">
-        <div
-          className={`h-full rounded-full transition-all duration-500 ease-out ${barColor}`}
-          style={{ width: `${percentage}%` }}
-        ></div>
-        {targetPercentage !== undefined && (
-          <div
-            className="absolute top-0 bottom-0 w-1 bg-white opacity-70 transform -translate-x-1/2"
-            style={{ left: `${targetPercentage}%` }}
-            title={`Target: ${target?.toFixed(1)} ${unit}`}
-          >
-            <div className="h-full w-px bg-white mx-auto"></div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
+const PLATFORM_TARGETS: Record<Platform, number | null> = {
+  Original: null,
+  Spotify: -14,
+  "Apple Music": -16,
+  Tidal: -14,
+  SoundCloud: -8,
 };
 
-const formatDB = (value: number | undefined): string => (value === undefined || !isFinite(value)) ? "N/A" : `${value.toFixed(1)} dB`;
-const formatLUFS = (value: number | undefined): string => (value === undefined || !isFinite(value)) ? "N/A" : `${value.toFixed(1)} LUFS`;
+const THEMES: Record<Platform, { bg: string; text: string; btn: string; btnHover: string; textAccent: string; sliderAccent: string }> = {
+  Original: {
+    bg: "bg-gray-300",
+    text: "text-gray-900",
+    btn: "bg-gray-400",
+    btnHover: "hover:bg-gray-500",
+    textAccent: "text-gray-800",
+    sliderAccent: "accent-gray-700",
+  },
+  Spotify: {
+    bg: "bg-green-900",
+    text: "text-white",
+    btn: "bg-green-600",
+    btnHover: "hover:bg-green-500",
+    textAccent: "text-green-300",
+    sliderAccent: "accent-green-500",
+  },
+  "Apple Music": {
+    bg: "bg-red-800",
+    text: "text-white",
+    btn: "bg-red-600",
+    btnHover: "hover:bg-red-500",
+    textAccent: "text-red-300",
+    sliderAccent: "accent-red-500",
+  },
+  Tidal: {
+    bg: "bg-neutral-900",
+    text: "text-white",
+    btn: "bg-neutral-700",
+    btnHover: "hover:bg-neutral-600",
+    textAccent: "text-neutral-300",
+    sliderAccent: "accent-neutral-400",
+  },
+  SoundCloud: {
+    bg: "bg-orange-700",
+    text: "text-white",
+    btn: "bg-orange-400",
+    btnHover: "hover:bg-orange-200",
+    textAccent: "text-orange-300",
+    sliderAccent: "accent-orange-300",
+  },
+};
 
-// IV. MAIN COMPONENT
-const LoudnessAnalyzerPage: React.FC = () => {
-  // A. STATE
-  const [audioFile, setAudioFile] = useState<File | null>(null);
-  const [originalAudioInfo, setOriginalAudioInfo] = useState<OriginalAudioInfo | null>(null);
-  const [platformAnalyses, setPlatformAnalyses] = useState<PlatformTarget[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-  const [activePlayerKey, setActivePlayerKey] = useState<string | null>(null);
+export default function LoudnessLab() {
+  const [fileName, setFileName] = useState<string>("");
+  const [audioURL, setAudioURL] = useState<string>("");
+  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [platform, setPlatform] = useState<Platform>("Original");
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
 
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const currentSourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const ctxRef = useRef<AudioContext | null>(null);
 
-  // Initialize AudioContext on component mount (client-side only)
+  /*–––––– PLATFORM GAIN ––––––*/
   useEffect(() => {
-    // The "use client" directive ensures this runs on the client
-    audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-    
+    if (!analysis) return;
+    const target = PLATFORM_TARGETS[platform];
+    const diffDb = target === null ? 0 : target - analysis.lufs;
+    const gain = Math.pow(10, diffDb / 20);
+    gainNodeRef.current?.gain.setTargetAtTime(gain, ctxRef.current!.currentTime, 0.01);
+  }, [platform, analysis]);
+
+  /*–––––– TIME LISTENERS ––––––*/
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a) return;
+    const t = () => setCurrentTime(a.currentTime);
+    const m = () => setDuration(a.duration);
+    a.addEventListener("timeupdate", t);
+    a.addEventListener("loadedmetadata", m);
     return () => {
-      currentSourceNodeRef.current?.stop();
-      currentSourceNodeRef.current?.disconnect();
-      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-        audioContextRef.current.close();
-      }
+      a.removeEventListener("timeupdate", t);
+      a.removeEventListener("loadedmetadata", m);
     };
-  }, []); // Empty dependency array means this runs once on mount and cleans up on unmount
+  }, [audioURL]);
 
-  // B. EFFECTS: Process audio file when it changes
-  useEffect(() => {
-    if (audioFile && audioContextRef.current) {
-      analyzeAudioFile(audioFile, audioContextRef.current);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps 
-  }, [audioFile]); // Added analyzeAudioFile to dependencies if it's not memoized, or ensure it's stable.
-                  // For simplicity here, assuming analyzeAudioFile changes rarely or is memoized.
-                  // Or pass audioContextRef.current into analyzeAudioFile if that's the main dependency.
+  /*–––––– FILE HANDLER ––––––*/
+  const handleFile = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFileName(file.name);
 
-  // C. HANDLERS
-  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    stopPlayback();
-    const file = event.target.files?.[0];
-    if (file) {
-      setAudioFile(file);
-      setError(null);
-      setOriginalAudioInfo(null);
-      setPlatformAnalyses([]);
-    } else {
-      setAudioFile(null);
+    const arrayBuffer = await file.arrayBuffer();
+    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    ctxRef.current = ctx;
+
+    /*–– Analysis ––*/
+    const ch = audioBuffer.getChannelData(0);
+    const sampleRate = audioBuffer.sampleRate;
+    const win = 0.1; // seconds
+    const winSamples = Math.floor(sampleRate * win);
+
+    let sumSq = 0;
+    let peakAbs = 0;
+    const waveform: WavePoint[] = [];
+    const lufsArr: LufsPoint[] = [];
+
+    for (let i = 0; i < ch.length; i++) {
+      const s = ch[i];
+      sumSq += s * s;
+      peakAbs = Math.max(peakAbs, Math.abs(s));
+
+      if (i % winSamples === 0) {
+        /* peak */
+        let segPeak = 0;
+        let segSum = 0;
+        for (let j = 0; j < winSamples && i + j < ch.length; j++) {
+          const v = ch[i + j];
+          segPeak = Math.max(segPeak, Math.abs(v));
+          segSum += v * v;
+        }
+        waveform.push({ time: i / sampleRate, peak: segPeak });
+        const segMean = segSum / winSamples;
+        const segLufs = -0.691 + 10 * Math.log10(segMean + 1e-12);
+        lufsArr.push({ time: i / sampleRate, lufs: segLufs });
+      }
     }
+
+    const meanSq = sumSq / ch.length;
+    const lufs = -0.691 + 10 * Math.log10(meanSq + 1e-12);
+    const peakDb = 20 * Math.log10(peakAbs + 1e-12);
+    const dynRange = peakDb - lufs;
+
+    setAnalysis({ lufs, peakDb, dynRange, waveformData: waveform, lufsData: lufsArr });
+
+    /*–– Player ––*/
+    const url = URL.createObjectURL(file);
+    setAudioURL(url);
+    const audio = new Audio(url);
+    const src = ctx.createMediaElementSource(audio);
+    const gainNode = ctx.createGain();
+    src.connect(gainNode).connect(ctx.destination);
+    audioRef.current = audio;
+    gainNodeRef.current = gainNode;
+
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
   };
 
-  const stopPlayback = useCallback(() => {
-    if (currentSourceNodeRef.current) {
-      try {
-        currentSourceNodeRef.current.stop();
-      } catch (e) {
-        // Ignore
-      }
-      currentSourceNodeRef.current.disconnect();
-      currentSourceNodeRef.current = null;
-    }
-    setActivePlayerKey(null);
-  }, []);
+  /*–––––– Controls ––––––*/
+  const togglePlay = async () => {
+    if (!audioRef.current || !ctxRef.current) return;
 
-  const playAudio = useCallback((buffer: AudioBuffer, gainDB: number = 0, playerKey: string) => {
-    if (!audioContextRef.current || !buffer || audioContextRef.current.state === 'suspended') {
-       // Attempt to resume context if suspended (e.g., by browser auto-play policy)
-      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-        audioContextRef.current.resume().then(() => {
-          // Retry playAudio after resume
-          // This is a common pattern, but for simplicity, we'll just log here.
-          // A more robust solution might involve queueing the play action.
-          console.log("AudioContext resumed. Please try playing again.");
-        });
+    if (ctxRef.current.state === "suspended") {
+      await ctxRef.current.resume();
+    }
+
+    if (isPlaying) {
+      audioRef.current.pause();
+    } else {
+      try {
+        await audioRef.current.play();
+      } catch (error) {
+        console.error("Playback failed:", error);
         return;
       }
-      console.warn("AudioContext not ready or buffer missing.");
-      return;
     }
-
-
-    stopPlayback();
-
-    const source = audioContextRef.current.createBufferSource();
-    source.buffer = buffer;
-
-    const gainNode = audioContextRef.current.createGain();
-    const linearGain = isFinite(gainDB) ? Math.pow(10, gainDB / 20) : 1;
-    gainNode.gain.setValueAtTime(linearGain, audioContextRef.current.currentTime);
-
-    source.connect(gainNode);
-    gainNode.connect(audioContextRef.current.destination);
-    source.start();
-
-    currentSourceNodeRef.current = source;
-    setActivePlayerKey(playerKey);
-
-    source.onended = () => {
-      if (currentSourceNodeRef.current === source) {
-        setActivePlayerKey(null);
-        currentSourceNodeRef.current = null;
-      }
-    };
-  }, [stopPlayback]);
-
-
-  // D. AUDIO PROCESSING LOGIC (Simplified for client-side)
-  const calculateSimulatedLUFS = (buffer: AudioBuffer): number => {
-    let sumOfSquares = 0;
-    const channelData = buffer.getChannelData(0);
-    for (let i = 0; i < channelData.length; i++) {
-      sumOfSquares += channelData[i] * channelData[i];
-    }
-    const rms = Math.sqrt(sumOfSquares / channelData.length);
-    if (rms === 0) return -Infinity;
-    return 20 * Math.log10(rms);
+    setIsPlaying(!isPlaying);
   };
 
-  const calculateSimulatedPeakDBFS = (buffer: AudioBuffer): number => {
-    let peak = 0;
-    for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-      const data = buffer.getChannelData(channel);
-      for (let i = 0; i < data.length; i++) {
-        const absValue = Math.abs(data[i]);
-        if (absValue > peak) {
-          peak = absValue;
-        }
-      }
-    }
-    if (peak === 0) return -Infinity;
-    return 20 * Math.log10(peak);
+  const seek = (t: number) => {
+    if (!audioRef.current) return;
+    audioRef.current.currentTime = t;
+    setCurrentTime(t);
   };
 
-  // analyzeAudioFile should ideally be memoized with useCallback if it's a dependency of useEffect
-  // or its dependencies need to be carefully managed.
-  // For now, we'll keep it as a regular function for simplicity, but be mindful of re-renders.
-  const analyzeAudioFile = async (file: File, audioCtx: AudioContext) => {
-    setIsLoading(true);
-    setError(null);
-    setOriginalAudioInfo(null);
-    setPlatformAnalyses([]);
+  /*–––––– Parallax Hero ––––––*/
+  useEffect(() => {
+    const h = () => document.documentElement.style.setProperty("--hero-offset", `${window.scrollY * 0.4}px`);
+    window.addEventListener("scroll", h);
+    return () => window.removeEventListener("scroll", h);
+  }, []);
 
-    try {
-      const arrayBuffer = await file.arrayBuffer();
-      // It's good practice to check if audioCtx is still valid (not closed)
-      if (audioCtx.state === 'closed') {
-          console.warn("AudioContext was closed before decoding could start.");
-          // Potentially re-initialize or handle this state.
-          // For now, we'll throw an error.
-          throw new Error("AudioContext is closed.");
-      }
-      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  const theme = THEMES[platform];
+  const diffDb = analysis && PLATFORM_TARGETS[platform] != null ? +(PLATFORM_TARGETS[platform]! - analysis.lufs).toFixed(1) : 0;
+  const explainer = platform === "Original"
+    ? "No loudness normalisation applied – raw file playback."
+    : `Track ${diffDb > 0 ? "boosted" : "attenuated"} ${Math.abs(diffDb)} dB to hit ${PLATFORM_TARGETS[platform]} LUFS (${platform}).`;
 
-      const originalLUFS = calculateSimulatedLUFS(audioBuffer);
-      const originalPeak = calculateSimulatedPeakDBFS(audioBuffer);
-
-      const initialInfo: OriginalAudioInfo = {
-        fileName: file.name,
-        duration: audioBuffer.duration,
-        sampleRate: audioBuffer.sampleRate,
-        integratedLUFS: originalLUFS,
-        truePeakDBTP: originalPeak,
-        audioBuffer: audioBuffer,
-      };
-      setOriginalAudioInfo(initialInfo);
-
-      const analyses: PlatformTarget[] = PLATFORM_TARGETS_DATA.map(platform => {
-        let gainAdjustmentDB = platform.targetLUFS - originalLUFS;
-        let peakAfterLoudnessNormalization = originalPeak + gainAdjustmentDB;
-        let willBeLimited = false;
-
-        if (peakAfterLoudnessNormalization > platform.targetPeakDBTP) {
-          willBeLimited = true;
-          const peakReductionNeeded = peakAfterLoudnessNormalization - platform.targetPeakDBTP;
-          gainAdjustmentDB -= peakReductionNeeded;
-        }
-        
-        const finalProcessedLUFS = originalLUFS + gainAdjustmentDB;
-        const finalProcessedPeak = originalPeak + gainAdjustmentDB;
-
-        return {
-          ...platform,
-          gainAdjustmentDB: gainAdjustmentDB,
-          processedMetrics: {
-            integratedLUFS: finalProcessedLUFS,
-            truePeakDBTP: finalProcessedPeak,
-          },
-          willBeLimited,
-        };
-      });
-
-      setPlatformAnalyses(analyses);
-
-    } catch (e: any) {
-      console.error("Error processing audio:", e);
-      setError(`Failed to process audio: ${e.message || "Unsupported format or corrupted file."}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-  // E. JSX RENDER (no changes needed in the JSX structure itself)
   return (
-    <>
-      <Head>
-        <title>Audio Loudness Analyzer</title>
-        <meta name="description" content="Analyze your audio track's loudness for streaming platforms." />
-      </Head>
-      <div className="min-h-screen bg-gradient-to-br from-gray-900 to-purple-900 text-white p-4 md:p-8 font-sans">
-        <header className="text-center mb-8">
-          <h1 className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-500">
-            Audio Loudness Analyzer
-          </h1>
-          <p className="text-lg text-gray-300 mt-2">
-            Upload your track. See how it might sound on popular streaming platforms.
-          </p>
-        </header>
-
-        <div className="max-w-lg mx-auto mb-10 bg-gray-800 bg-opacity-70 p-6 rounded-xl shadow-2xl backdrop-filter backdrop-blur-md">
-          <label htmlFor="audioUpload" className="block text-xl font-semibold text-purple-300 mb-3 text-center">
-            Upload Your Audio File
+    <div className={`min-h-screen transition-colors duration-300 ${theme.bg} ${theme.text}`}>      
+      {/* ––––– Hero ––––– */}
+      <section className="relative overflow-hidden pb-16">
+        <motion.h1
+          initial={{ opacity: 0, y: -40 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.8 }}
+          className={`text-4xl md:text-6xl font-extrabold text-center pt-24 ${theme.textAccent}`}
+          style={{ translateY: "calc(var(--hero-offset,0px) * -1)" }}
+        >
+          Loudness Lab
+        </motion.h1>
+        <motion.p
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3 }}
+          className="text-center mt-3 text-lg max-w-xl mx-auto"
+        >
+          Upload your track and preview how streaming platforms reshape its loudness.
+        </motion.p>
+        <div className="mt-8 flex justify-center">
+          <label className={`px-6 py-3 rounded-lg cursor-pointer font-semibold text-sm ${theme.btn} ${theme.btnHover}`}>
+            Choose Audio File
+            <input type="file" accept="audio/*" className="hidden" onChange={handleFile} />
           </label>
-          <input
-            type="file"
-            id="audioUpload"
-            accept="audio/mpeg, audio/wav, audio/aac, audio/ogg, audio/flac, audio/mp4, .m4a"
-            onChange={handleFileChange}
-            className="block w-full text-sm text-gray-300 file:mr-4 file:py-3 file:px-6 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-gradient-to-r file:from-purple-500 file:to-pink-500 file:text-white hover:file:from-purple-600 hover:file:to-pink-600 cursor-pointer transition-all duration-300 ease-in-out focus:outline-none focus:ring-2 focus:ring-purple-500"
-          />
-          {isLoading && <p className="text-yellow-300 mt-4 text-center animate-pulse">Analyzing audio, please wait...</p>}
-          {error && <p className="text-red-300 mt-4 text-center bg-red-800 bg-opacity-50 p-3 rounded-lg">{error}</p>}
         </div>
+        {fileName && <p className="text-center text-sm mt-2 opacity-80">Selected: {fileName}</p>}
+      </section>
 
-        {originalAudioInfo && (
-          <section className="mb-12 p-6 bg-gray-800 bg-opacity-70 rounded-xl shadow-2xl backdrop-filter backdrop-blur-md max-w-3xl mx-auto">
-            <h2 className="text-3xl font-semibold text-purple-300 mb-5 text-center border-b-2 border-purple-500 pb-3">Original Track Analysis</h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 mb-5 text-sm text-gray-200">
-              <p><strong className="text-gray-400">File:</strong> {originalAudioInfo.fileName}</p>
-              <p><strong className="text-gray-400">Duration:</strong> {originalAudioInfo.duration.toFixed(2)}s</p>
-              <p><strong className="text-gray-400">Sample Rate:</strong> {originalAudioInfo.sampleRate} Hz</p>
-              <p><strong className="text-gray-400">Channels:</strong> {originalAudioInfo.audioBuffer?.numberOfChannels}</p>
-            </div>
-            
-            <LoudnessBar 
-              label="Original Integrated Loudness (RMS-based)" 
-              value={originalAudioInfo.integratedLUFS} 
-              min={-40} max={0} unit="LUFS" isOriginal={true}
-            />
-            <LoudnessBar 
-              label="Original Peak Level (Sample Peak)" 
-              value={originalAudioInfo.truePeakDBTP} 
-              min={-20} max={0} unit="dBFS" isOriginal={true}
-            />
-
-            <div className="mt-6 text-center">
+      {/* ––––– Analysis Section ––––– */}
+      {analysis && (
+        <section className="px-4 md:px-12 lg:px-24 py-12 space-y-14">
+          {/* Platform Selector */}
+          <div className="flex flex-wrap justify-center gap-3">
+            {(Object.keys(PLATFORM_TARGETS) as Platform[]).map((p) => (
               <button
-                onClick={() => {
-                    if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-                        audioContextRef.current.resume().then(() => {
-                           if (originalAudioInfo.audioBuffer) playAudio(originalAudioInfo.audioBuffer, 0, 'original');
-                        });
-                    } else if (originalAudioInfo.audioBuffer) {
-                         playAudio(originalAudioInfo.audioBuffer, 0, 'original');
-                    }
-                }}
-                disabled={isLoading || !originalAudioInfo.audioBuffer || activePlayerKey === 'original'}
-                className={`px-8 py-3 rounded-lg font-semibold transition-all duration-300 ease-in-out shadow-lg transform hover:scale-105
-                  ${activePlayerKey === 'original' 
-                    ? 'bg-green-500 hover:bg-green-600 text-white ring-2 ring-green-300' 
-                    : 'bg-blue-600 hover:bg-blue-700 text-white'} 
-                  disabled:bg-gray-600 disabled:text-gray-400 disabled:cursor-not-allowed disabled:transform-none`}
+                key={p}
+                onClick={() => setPlatform(p)}
+                className={`px-4 py-2 rounded-full font-medium transition active:scale-95 ${
+                  platform === p ? theme.btn : "bg-white/20 dark:bg-white/10 hover:bg-white/30"
+                }`}
               >
-                {activePlayerKey === 'original' ? 'Playing Original...' : 'Play Original Track'}
+                {p}
               </button>
-            </div>
-          </section>
-        )}
+            ))}
+          </div>
 
-        {platformAnalyses.length > 0 && originalAudioInfo && (
-          <section>
-            <h2 className="text-3xl font-semibold text-purple-300 mb-8 text-center border-b-2 border-purple-500 pb-3">Streaming Platform Simulations</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {platformAnalyses.map((platform) => (
-                <div key={platform.id} className="bg-gray-800 bg-opacity-70 p-5 rounded-xl shadow-2xl backdrop-filter backdrop-blur-md flex flex-col justify-between transition-all duration-300 hover:shadow-purple-500/30">
-                  <div>
-                    <h3 className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-400 mb-2">{platform.name}</h3>
-                    <p className="text-xs text-gray-400 mb-3">Target: {formatLUFS(platform.targetLUFS)}, {formatDB(platform.targetPeakDBTP)} Peak</p>
-                    
-                    <LoudnessBar
-                      label="Est. Loudness After Normalization"
-                      value={platform.processedMetrics?.integratedLUFS ?? 0}
-                      target={platform.targetLUFS}
-                      min={-30} max={-5} unit="LUFS"
-                    />
-                    <LoudnessBar
-                      label="Est. Peak After Normalization"
-                      value={platform.processedMetrics?.truePeakDBTP ?? 0}
-                      target={platform.targetPeakDBTP}
-                      min={-12} max={0} unit="dBFS"
-                    />
-
-                    <p className="text-sm mt-4">
-                      <strong className="text-gray-300">Simulated Gain Change:</strong> 
-                      <span className={`font-semibold ${ (platform.gainAdjustmentDB ?? 0) > 0.1 ? 'text-green-400' : (platform.gainAdjustmentDB ?? 0) < -0.1 ? 'text-red-400' : 'text-yellow-400'}`}>
-                        {formatDB(platform.gainAdjustmentDB)}
-                      </span>
-                    </p>
-                    {platform.willBeLimited && (
-                      <p className="text-sm text-yellow-300 mt-1">
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline mr-1" viewBox="0 0 20 20" fill="currentColor">
-                          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.216 3.031-1.742 3.031H4.42c-1.526 0-2.492-1.697-1.742-3.031l5.58-9.92zM10 13a1 1 0 110-2 1 1 0 010 2zm-1.75-5.5a.75.75 0 00-1.5 0v2.5a.75.75 0 001.5 0v-2.5z" clipRule="evenodd" />
-                        </svg>
-                        Track likely limited to meet peak target. Effective LUFS may be lower than platform target.
-                      </p>
-                    )}
-                     {platform.bitrateRecommendation && <p className="text-xs text-gray-500 mt-3 italic">Tip: {platform.bitrateRecommendation}</p>}
-                  </div>
-                  <button
-                    onClick={() => {
-                        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-                            audioContextRef.current.resume().then(() => {
-                                if (originalAudioInfo?.audioBuffer) playAudio(originalAudioInfo.audioBuffer, platform.gainAdjustmentDB ?? 0, platform.id);
-                            });
-                        } else if (originalAudioInfo?.audioBuffer) {
-                             playAudio(originalAudioInfo.audioBuffer, platform.gainAdjustmentDB ?? 0, platform.id);
-                        }
-                    }}
-                    disabled={isLoading || !originalAudioInfo?.audioBuffer || activePlayerKey === platform.id}
-                    className={`mt-5 w-full px-4 py-3 rounded-lg font-semibold transition-all duration-300 ease-in-out shadow-md transform hover:scale-105
-                      ${activePlayerKey === platform.id 
-                        ? 'bg-green-500 hover:bg-green-600 text-white ring-2 ring-green-300' 
-                        : 'bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white'} 
-                      disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed disabled:transform-none`}
-                  >
-                    {activePlayerKey === platform.id ? `Playing on ${platform.name}...` : `Play ${platform.name} Sim`}
-                  </button>
-                </div>
-              ))}
+          {/* Player */}
+          <div className="max-w-3xl mx-auto bg-white/20 dark:bg-white/10 rounded-xl p-5 flex flex-col gap-4">
+            <div className="flex items-center gap-4">
+              <button
+                onClick={togglePlay}
+                className={`w-12 h-12 rounded-full flex items-center justify-center text-xl ${theme.btn} ${theme.btnHover}`}
+              >
+                {isPlaying ? "❚❚" : "▶"}
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={duration || 0}
+                value={currentTime}
+                onChange={(e) => seek(Number(e.target.value))}
+                className={`w-full ${theme.sliderAccent}`}
+              />
+              <span className="w-24 text-right text-xs tabular-nums shrink-0">
+                {Math.floor(currentTime)} / {Math.floor(duration)}s
+              </span>
             </div>
-            {activePlayerKey && activePlayerKey !== 'original' && (
-              <div className="text-center mt-10">
-                <button
-                    onClick={stopPlayback}
-                    className="px-10 py-3 rounded-lg font-semibold bg-red-600 hover:bg-red-700 text-white text-lg shadow-xl transition-all duration-300 transform hover:scale-105"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 inline mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12H3M12 21V3" transform="rotate(45 12 12) scale(0.8)"/>
-                    </svg>
-                    Stop All Audio
-                </button>
+            <label className={`self-end text-xs cursor-pointer ${theme.textAccent}`}>
+              Upload New Track
+              <input type="file" accept="audio/*" className="hidden" onChange={handleFile} />
+            </label>
+          </div>
+
+          {/* Explainer */}
+          <p className="text-center text-sm italic opacity-80">{explainer}</p>
+
+          {/* Stats */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            {[
+              { label: "Integrated LUFS", value: analysis.lufs.toFixed(1) },
+              { label: "True Peak dBFS", value: analysis.peakDb.toFixed(1) },
+              { label: "Dyn Range", value: analysis.dynRange.toFixed(1) },
+              { label: "Gain dB", value: diffDb.toFixed(1) },
+            ].map(({ label, value }) => (
+              <div key={label} className="bg-white/20 dark:bg-white/10 rounded-xl p-4 text-center">
+                <h3 className={`text-sm font-semibold mb-1 ${theme.textAccent}`}>{label}</h3>
+                <p className="text-2xl font-bold tabular-nums">{value}</p>
               </div>
-            )}
-          </section>
-        )}
-        
-        {!audioFile && !isLoading && (
-            <div className="text-center text-gray-400 mt-20">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 mx-auto mb-4 text-purple-400 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
-                </svg>
-                <p className="text-xl">Ready to analyze your masterpiece?</p>
-                <p>Upload an audio file to begin.</p>
+            ))}
+          </div>
+
+          {/* Waveform Chart */}
+          <div className="bg-white/20 dark:bg-white/10 rounded-xl p-5">
+            <h3 className={`text-sm font-semibold mb-3 ${theme.textAccent}`}>Waveform Peak</h3>
+            <div className="h-40 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart
+                  data={analysis.waveformData}
+                  onClick={(e: any) => e && e.activeLabel != null && seek(e.activeLabel)}
+                  margin={{ top: 5, right: 20, bottom: 5, left: 0 }}
+                >
+                  <CartesianGrid stroke="#555" strokeDasharray="3 3" />
+                  <XAxis
+                    dataKey="time"
+                    tick={{ fill: "#ccc" }}
+                    tickFormatter={(v) => `${Math.round(v)}s`}
+                    interval="preserveStartEnd"
+                  />
+                  <YAxis
+                    domain={[0, 1]}
+                    ticks={[0, 0.5, 1]}
+                    tick={{ fill: "#ccc" }}
+                  />
+                  <Tooltip
+                    formatter={(v: number) => v.toFixed(2)}
+                    labelFormatter={(l) => `${Math.round(l)}s`}
+                    contentStyle={{ background: "#1f2937", border: "none" }}
+                  />
+                  <Line type="monotone" dataKey="peak" stroke="#ffffff" dot={false} strokeWidth={2} />
+                </LineChart>
+              </ResponsiveContainer>
             </div>
-        )}
+            <p className="text-xs text-center mt-1 opacity-70">Tap / hover to seek & inspect</p>
+          </div>
 
-        <footer className="text-center mt-16 py-8 border-t border-gray-700">
-          <p className="text-sm text-gray-400">
-            Loudness Analyzer v0.2.1 - For educational and illustrative purposes.
-          </p>
-          <p className="text-xs text-gray-500 mt-2 max-w-2xl mx-auto">
-            <strong>Disclaimer:</strong> Loudness (LUFS) and Peak (dBTP) measurements are highly simplified (RMS-based and sample peak respectively) and are NOT standard-compliant or broadcast accurate. They provide a basic estimation only. Always use professional metering tools and your ears for final mastering decisions. Platform processing algorithms are complex and proprietary; this tool simulates normalization via gain adjustment.
-          </p>
-        </footer>
-      </div>
-    </>
+          {/* LUFS Chart */}
+          <div className="bg-white/20 dark:bg-white/10 rounded-xl p-5">
+            <h3 className={`text-sm font-semibold mb-3 ${theme.textAccent}`}>LUFS over Time</h3>
+            <div className="h-48 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart
+                  data={analysis.lufsData}
+                  onClick={(e: any) => e && e.activeLabel != null && seek(e.activeLabel)}
+                  margin={{ top: 5, right: 20, bottom: 5, left: 0 }}
+                >
+                  <CartesianGrid stroke="#555" strokeDasharray="3 3" />
+                  <XAxis
+                    dataKey="time"
+                    tick={{ fill: "#ccc" }}
+                    tickFormatter={(v) => `${Math.round(v)}s`}
+                    interval="preserveStartEnd"
+                  />
+                  <YAxis
+                    domain={[-60, 0]}
+                    ticks={[-60, -40, -20, 0]}
+                    tick={{ fill: "#ccc" }}
+                  />
+                  <Tooltip
+                    formatter={(v: number) => v.toFixed(1) + " dB"}
+                    labelFormatter={(l) => `${Math.round(l)}s`}
+                    contentStyle={{ background: "#1f2937", border: "none" }}
+                  />
+                  <Line type="monotone" dataKey="lufs" stroke="#06b6d4" dot={false} strokeWidth={2} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            <p className="text-xs text-center mt-1 opacity-70">Tap / hover to seek & inspect</p>
+          </div>
+        </section>
+      )}
+
+      <footer className="text-center text-xs py-6 opacity-70">© {new Date().getFullYear()} Devs.Miami</footer>
+    </div>
   );
-};
+}
 
-export default LoudnessAnalyzerPage;
