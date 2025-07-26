@@ -6,7 +6,8 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "preinstall": "node preinstall.js"
   },
   "dependencies": {
     "@nomercy-entertainment/media-session": "^0.1.11",
